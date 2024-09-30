@@ -64,9 +64,9 @@ const tripbotUAT = '@TripBot UAT (Moonbear)';
 
 // Costs per 1k tokens
 const aiCosts = {
-  GPT_3_5_TURBO: {
-    input: 0.0005,
-    output: 0.0015,
+  GPT_3_5_TURBO: { // LAZY TEMP FIX - CHANGE NAME THESE PRICES ARE FOR 4o MINI NOW
+    input: 0.00015,
+    output: 0.00060,
   },
   // GPT_3_5_TURBO_1106: {
   //   input: 0.001,
@@ -1712,14 +1712,14 @@ async function agreeToTerms(
     embeds: [embedTemplate()
       .setTitle('🤖 Welcome to TripBot\'s AI Module! 🤖')
       .setDescription(`
-        Please agree to the following. Use \`/ai help\` for more more information.
+        Please agree to the following. Use \`/ai help\` for more information.
 
         ${termsOfService}
       `)
       .setFooter(null)],
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        buttonAiAgree.setCustomId(`AI~messageAgree~${messageData.id}`),
+        buttonAiAgree.setCustomId(`AI~messageAgree~${messageData.author.id}`),
       ),
     ],
   };
@@ -2397,11 +2397,12 @@ export async function aiButton(
 ):Promise<void> {
   const buttonID = interaction.customId;
   log.debug(F, `buttonID: ${buttonID}`);
-  const [, buttonAction] = buttonID.split('~') as [
+  const [, buttonAction, messageAuthorId] = buttonID.split('~') as [
     null,
     'help' | 'personas' | 'setup' | 'agree' | 'privacy' |
     'link' | 'unlink' | 'messageAgree' | 'modify' | 'new' |
-    'create' | 'delete' | 'deleteConfirm' | 'deleteHistory' | 'deleteHistoryConfirm'];
+    'create' | 'delete' | 'deleteConfirm' | 'deleteHistory' | 'deleteHistoryConfirm',
+    string];
 
   // eslint-disable-next-line sonarjs/no-small-switch
   switch (buttonAction) {
@@ -2427,6 +2428,12 @@ export async function aiButton(
         },
       });
 
+      // const messageData = await interaction.message.fetchReference();
+
+      if (messageAuthorId !== interaction.user.id) {
+        log.debug(F, `${interaction.user.displayName} tried to accept the AI ToS using someone else's instance of the ToS.`);
+        return;
+      }
       await aiMessage(interaction.message);
       break;
     }

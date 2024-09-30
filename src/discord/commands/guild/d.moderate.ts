@@ -789,7 +789,7 @@ export async function modResponse(
   }
 
   let targetString = '';
-  let target = {} as GuildMember;
+  let target = {} as GuildMember | User;
   const modEmbedObj = embedTemplate();
 
   const { embedColor } = embedVariables[command as keyof typeof embedVariables];
@@ -839,43 +839,50 @@ export async function modResponse(
           create: { discord_id: userId },
           update: {},
         });
-
-        actionRow.addComponents(
-          modButtonNote(userId),
-        );
-
         let banVerb = 'ban';
-        let userBan = {} as GuildBan;
-        try {
-          userBan = await interaction.guild.bans.fetch(userId);
-        } catch (err: unknown) {
-          // log.debug(F, `Error fetching ban: ${err}`);
-        }
-        if (userBan.guild) {
+        if (showModButtons) {
           actionRow.addComponents(
-            modButtonUnBan(userId),
+            modButtonNote(userId),
           );
-          banVerb = 'un-ban';
-        } else {
+
+          let userBan = {} as GuildBan;
+          try {
+            userBan = await interaction.guild.bans.fetch(userId);
+          } catch (err: unknown) {
+            // log.debug(F, `Error fetching ban: ${err}`);
+          }
+          if (userBan.guild) {
+            actionRow.addComponents(
+              modButtonUnBan(userId),
+            );
+            banVerb = 'un-ban';
+          } else {
+            actionRow.addComponents(
+              modButtonBan(userId),
+            );
+          }
+
           actionRow.addComponents(
-            modButtonBan(userId),
+            modButtonInfo(userId),
           );
         }
 
-        actionRow.addComponents(
-          modButtonInfo(userId),
-        );
-
-        if (isReport(command)) {
+        if (isReport(command) && showModButtons) {
           modEmbedObj.setDescription(stripIndents`
           User ID '${userId}' is not in the guild, but I can still Note or ${banVerb} them!`);
         } else {
           log.debug(F, '[modResponse] generating user info');
           const modlogEmbed = await userInfoEmbed(actor, targetObj, targetData, command, showModButtons);
           log.debug(F, `modlogEmbed: ${JSON.stringify(modlogEmbed, null, 2)}`);
-          actionRow.setComponents([
-            modButtonInfo(userId),
-          ]);
+          if (showModButtons) {
+            actionRow.setComponents([
+              modButtonInfo(userId),
+            ]);
+          } else {
+            actionRow.setComponents([
+              modButtonReport(userId),
+            ]);
+          }
           if (isBan(command)) {
             actionRow.addComponents(
               modButtonUnBan(userId),
@@ -903,13 +910,15 @@ export async function modResponse(
     // log.debug(F, `Assigning target from string: ${targets}`);
     [target] = targets;
   }
-  if (interaction.isUserContextMenuCommand() && interaction.targetMember) {
+
+  if (interaction.isUserContextMenuCommand() && (interaction.targetMember || interaction.targetUser)) {
     // log.debug(F, `User context target member: ${interaction.targetMember}`);
-    target = interaction.targetMember as GuildMember;
+    target = interaction.targetMember ? interaction.targetMember as GuildMember : interaction.targetUser as User;
   } else if (interaction.isMessageContextMenuCommand() && interaction.targetMessage) {
     // log.debug(F, `Message context target message member: ${interaction.targetMessage.member}`);
-    target = interaction.targetMessage.member as GuildMember;
+    target = interaction.targetMessage.member ? interaction.targetMessage.member as GuildMember : interaction.targetMessage.author as User;
   }
+
   const targetData = await db.users.upsert({
     where: {
       discord_id: target.id,
@@ -937,7 +946,10 @@ export async function modResponse(
   // Determine if the actor is a mod
   // const actorIsMod = (!!guildData.role_moderator && actor.roles.cache.has(guildData.role_moderator));
 
-  const timeoutTime = target.communicationDisabledUntilTimestamp;
+  let timeoutTime = null;
+  if (target instanceof GuildMember) {
+    timeoutTime = target.communicationDisabledUntilTimestamp;
+  }
 
   if (showModButtons) {
     if (isInfo(command) || isReport(command)) {
@@ -1497,6 +1509,10 @@ export async function moderate(
     );
   }
 
+  if (command === 'FULL_BAN') {
+    internalNote += `\n **Actioned by:** ${actor.displayName}`;
+  }
+
   let actionData = {
     user_id: targetData.id,
     guild_id: actor.guild.id,
@@ -1694,7 +1710,7 @@ export async function moderate(
       > ${modalInt.fields.getTextInputValue('internalNote')}
   
       Message sent to user:
-      > ${modalInt.fields.getTextInputValue('description')}`,
+      > ${!isNote(command) && !isReport(command) ? modalInt.fields.getTextInputValue('description') : ''}`,
         inline: true,
       },
     );
@@ -1716,7 +1732,7 @@ export async function moderate(
     .setDescription(desc)
     .setFooter(null);
 
-  if (command !== 'REPORT' && modThread) response.setDescription(`${response.data.description}\nYou can access their thread here: ${modThread}`);
+  if (!isReport(command) && modThread) response.setDescription(`${response.data.description}\nYou can access their thread here: ${modThread}`);
 
   log.debug(F, `Returning embed: ${JSON.stringify(response, null, 2)}`);
   return { embeds: [response] };
@@ -1859,7 +1875,11 @@ export async function modModal(
     .setCustomId('internalNote');
 
   try {
-    modalInputComponent.setLabel(`Why are you ${verb} ${target}?`);
+    // Ensure the label text is within the limit
+    const label = `Why are you ${verb} ${target}?`;
+    const truncatedLabelText = label.length > 45 ? `${label.substring(0, 41)}...?` : label;
+
+    modalInputComponent.setLabel(truncatedLabelText);
   } catch (err) {
     log.error(F, `Error: ${err}`);
     log.error(F, `Verb: ${verb}, Target: ${target}`);
@@ -1939,8 +1959,24 @@ export async function modModal(
   const filter = (i: ModalSubmitInteraction) => i.customId.startsWith('modModal');
   await interaction.awaitModalSubmit({ filter, time: disableButtonTime })
     .then(async i => {
-      if (i.customId.split('~')[2] !== interaction.id) return;
+      if (i.customId.split('~')[2] !== interaction.id) {
+        return;
+      }
       await i.deferReply({ ephemeral: true });
+      try {
+        if (command === 'REPORT' || command === 'NOTE') {
+          await moderate(interaction, i);
+          const reportResponseEmbed = embedTemplate()
+            .setColor(command === 'REPORT' ? Colors.Yellow : Colors.Green)
+            .setTitle(command === 'REPORT' ? 'Your report was sent!' : 'Your note was added!')
+            .setDescription(command === 'REPORT' ? 'The moderators have received your report and will look into it. Thanks!' : `Your note was successfully added to ${target}'s thread.`);
+          await i.editReply({
+            embeds: [reportResponseEmbed],
+          });
+        }
+      } catch (err) {
+        log.info(F, `[modModal ModalSubmitInteraction]: ${err}`);
+      }
       // const internalNote = i.fields.getTextInputValue('internalNote'); // eslint-disable-line
 
       // // Only these commands actually have the description input, so only pull it if it exists
@@ -2032,8 +2068,9 @@ export async function modModal(
           // log.error(F, `Error: ${err}`);
         }
       }
-
-      await i.editReply(await moderate(interaction, i));
+      if (!isNote(command) && !isReport(command)) {
+        await i.editReply(await moderate(interaction, i));
+      }
     })
     .catch(async err => {
       // log.error(F, `Error: ${JSON.stringify(err as DiscordErrorData, null, 2)}`);
